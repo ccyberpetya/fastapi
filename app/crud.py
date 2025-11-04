@@ -1,54 +1,85 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from app.models import Advertisement
 from app.schemas import AdvertisementCreate, AdvertisementUpdate
-from typing import Optional, Dict, Any
+from typing import Optional, List
+from fastapi import HTTPException
 
 
-def create_advertisement(db: Session, advertisement: AdvertisementCreate):
-    db_advertisement = Advertisement(
-        headline=advertisement.headline,
-        description=advertisement.description,
-        price=advertisement.price,
-        author=advertisement.author
-    )
-    db.add(db_advertisement)
-    db.commit()
-    db.refresh(db_advertisement)
-    return db_advertisement
+async def create_advertisement(db: AsyncSession, advertisement: AdvertisementCreate):
+    try:
+        db_advertisement = Advertisement(
+            title=advertisement.title,  #
+            description=advertisement.description,
+            price=advertisement.price,
+            author=advertisement.author
+        )
+        db.add(db_advertisement)
+        await db.commit()
+        await db.refresh(db_advertisement)
+        return db_advertisement
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Ошибка целостности данных")
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных: {str(e)}")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 
 
-def get_advertisement(db: Session, advertisement_id: int):
-    return db.query(Advertisement).filter(Advertisement.id == advertisement_id).first()
+async def get_advertisement(db: AsyncSession, advertisement_id: int):
+    try:
+        result = await db.execute(select(Advertisement).where(Advertisement.id == advertisement_id))
+        return result.scalar_one_or_none()
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных: {str(e)}")
 
 
-def update_advertisement(db: Session, advertisement_id: int, advertisement: AdvertisementUpdate):
-    db_advertisement = db.query(Advertisement).filter(Advertisement.id == advertisement_id).first()
-    if not db_advertisement:
-        return None
+async def update_advertisement(db: AsyncSession, advertisement_id: int, advertisement: AdvertisementUpdate):
+    try:
+        result = await db.execute(select(Advertisement).where(Advertisement.id == advertisement_id))
+        db_advertisement = result.scalar_one_or_none()
 
-    update_data = advertisement.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(db_advertisement, field, value)
+        if not db_advertisement:
+            return None
 
-    db.commit()
-    db.refresh(db_advertisement)
-    return db_advertisement
+        update_data = advertisement.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(db_advertisement, field, value)
+
+        await db.commit()
+        await db.refresh(db_advertisement)
+        return db_advertisement
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Ошибка целостности данных")
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных: {str(e)}")
 
 
-def delete_advertisement(db: Session, advertisement_id: int):
-    db_advertisement = db.query(Advertisement).filter(Advertisement.id == advertisement_id).first()
-    if not db_advertisement:
-        return False
+async def delete_advertisement(db: AsyncSession, advertisement_id: int):
+    try:
+        result = await db.execute(select(Advertisement).where(Advertisement.id == advertisement_id))
+        db_advertisement = result.scalar_one_or_none()
 
-    db.delete(db_advertisement)
-    db.commit()
-    return True
+        if not db_advertisement:
+            return False
+
+        await db.delete(db_advertisement)
+        await db.commit()
+        return True
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных: {str(e)}")
 
 
-def search_advertisements(
-        db: Session,
-        headline: Optional[str] = None,
+async def search_advertisements(
+        db: AsyncSession,
+        title: Optional[str] = None,
         description: Optional[str] = None,
         author: Optional[str] = None,
         min_price: Optional[float] = None,
@@ -56,21 +87,27 @@ def search_advertisements(
         skip: int = 0,
         limit: int = 100
 ):
-    query = db.query(Advertisement)
+    try:
+        query = select(Advertisement)
 
-    filters = []
-    if headline:
-        filters.append(Advertisement.headline.ilike(f"%{headline}%"))
-    if description:
-        filters.append(Advertisement.description.ilike(f"%{description}%"))
-    if author:
-        filters.append(Advertisement.author.ilike(f"%{author}%"))
-    if min_price is not None:
-        filters.append(Advertisement.price >= min_price)
-    if max_price is not None:
-        filters.append(Advertisement.price <= max_price)
+        filters = []
+        if title:
+            filters.append(Advertisement.title.ilike(f"%{title}%"))
+        if description:
+            filters.append(Advertisement.description.ilike(f"%{description}%"))
+        if author:
+            filters.append(Advertisement.author.ilike(f"%{author}%"))
+        if min_price is not None:
+            filters.append(Advertisement.price >= min_price)
+        if max_price is not None:
+            filters.append(Advertisement.price <= max_price)
 
-    if filters:
-        query = query.filter(and_(*filters))
+        if filters:
+            query = query.where(and_(*filters))
 
-    return query.offset(skip).limit(limit).all()
+        query = query.offset(skip).limit(limit).order_by(Advertisement.created_at.desc())
+
+        result = await db.execute(query)
+        return result.scalars().all()
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных: {str(e)}")
